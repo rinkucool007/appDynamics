@@ -1,0 +1,202 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - development
+      - integration
+      - master
+  pull_request:
+    branches:
+      - development
+      - integration
+      - master
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*') }}
+          restore-keys: ${{ runner.os }}-gradle-
+
+      - name: Build with Gradle
+        run: ./gradlew build
+
+      - name: Run tests
+        run: ./gradlew test
+
+      - name: Send test results to Splunk
+        if: always()
+        run: |
+          ENVIRONMENT=$(echo "${{ github.ref_name }}" | sed 's/master/prod/' | sed 's/development/dev/')
+          curl -k "${{ secrets.SPLUNK_HEC_URL }}/services/collector" \
+            -H "Authorization: Splunk ${{ secrets.SPLUNK_HEC_TOKEN_${{ github.ref_name == 'master' && 'PROD' || github.ref_name == 'integration' && 'INTEGRATION' || 'DEV' }}}" \
+            -d "{\"event\": {\"job\": \"build-and-test\", \"status\": \"${{ job.status }}\", \"runner\": \"${{ runner.os }}\", \"environment\": \"$ENVIRONMENT\", \"branch\": \"${{ github.ref_name }}\"}, \"sourcetype\": \"github_actions\", \"source\": \"ci_cd_pipeline\"}"
+
+      - name: Send test results to AppDynamics
+        if: always()
+        run: |
+          ENVIRONMENT=$(echo "${{ github.ref_name }}" | sed 's/master/prod/' | sed 's/development/dev/')
+          curl -X POST "https://${{ secrets.APPDYNAMICS_CONTROLLER_HOST }}/controller/rest/applications/HelloWorldApp-$ENVIRONMENT/events" \
+            -H "X-Events-API-AccountName: ${{ secrets.APPDYNAMICS_CONTROLLER_ACCOUNT }}" \
+            -H "X-Events-API-Key: ${{ secrets.APPLDYNAMICS_CONTROLLER_ACCESS_KEY_${{ github.ref_name == 'master' && 'PROD' || github.ref_name == 'integration' && 'INTEGRATION' || 'DEV' }}}" \
+            -d "{\"name\": \"CI/CD Build\", \"type\": \"CUSTOM\", \"summary\": \"Build and test job\", \"severity\": \"INFO\", \"properties\": {\"status\": \"${{ job.status }}\", \"job\": \"build-and-test\", \"environment\": \"$ENVIRONMENT\", \"branch\": \"${{ github.ref_name }}\"}}"
+
+  deploy-dev:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/development'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -f Dockerfile.dev \
+            --build-arg APPDYNAMICS_DOWNLOAD_URL=${{ secrets.APPDYNAMICS_DOWNLOAD_URL }} \
+            --build-arg APPDYNAMICS_CLIENT_ACCESS_KEY=${{ secrets.APPDYNAMICS_CLIENT_ACCESS_KEY }} \
+            -t hello-world-app:dev-${{ github.sha }} .
+
+      - name: Deploy to Dev
+        run: |
+          # Simulate deployment with docker run (replace with actual deployment, e.g., Kubernetes)
+          docker run -d --name hello-world-app-dev \
+            -p 8080:8080 \
+            -e SPRING_PROFILES_ACTIVE=dev \
+            -e APPDYNAMICS_CONTROLLER_HOST=${{ secrets.APPDYNAMICS_CONTROLLER_HOST }} \
+            -e APPDYNAMICS_CONTROLLER_PORT=443 \
+            -e APPDYNAMICS_CONTROLLER_SSL_ENABLED=true \
+            -e APPDYNAMICS_CONTROLLER_ACCOUNT=${{ secrets.APPDYNAMICS_CONTROLLER_ACCOUNT }} \
+            -e APPDYNAMICS_CONTROLLER_ACCESS_KEY=${{ secrets.APPDYNAMICS_CONTROLLER_ACCESS_KEY_DEV }} \
+            -e APPDYNAMICS_AGENT_APPLICATION_NAME=HelloWorldApp-Dev \
+            -e APPDYNAMICS_AGENT_TIER_NAME=WebTier-Dev \
+            -e APPDYNAMICS_AGENT_NODE_NAME=Node1-Dev \
+            -e SPLUNK_HEC_URL=${{ secrets.SPLUNK_HEC_URL }} \
+            -e SPLUNK_HEC_TOKEN=${{ secrets.SPLUNK_HEC_TOKEN_DEV }} \
+            hello-world-app:dev-${{ github.sha }}
+
+      - name: Send deployment status to Splunk
+        if: always()
+        run: |
+          curl -k "${{ secrets.SPLUNK_HEC_URL }}/services/collector" \
+            -H "Authorization: Splunk ${{ secrets.SPLUNK_HEC_TOKEN_DEV }}" \
+            -d "{\"event\": {\"job\": \"deploy-dev\", \"status\": \"${{ job.status }}\", \"image\": \"hello-world-app:dev-${{ github.sha }}\", \"environment\": \"dev\", \"branch\": \"${{ github.ref_name }}\"}, \"sourcetype\": \"github_actions\", \"source\": \"ci_cd_pipeline\""
+
+      - name: Send deployment status to AppDynamics
+        if: always()
+        run: |
+          curl -X POST "https://${{ secrets.APPDYNAMICS_CONTROLLER_HOST }}/controller/rest/applications/HelloWorldApp-Dev/events" \
+            -H "X-Events-API-AccountName: ${{ secrets.APPDYNAMICS_CONTROLLER_ACCOUNT }}" \
+            -H "X-Events-API-Key: ${{ secrets.APPDYNAMICS_CONTROLLER_ACCESS_KEY_DEV }}" \
+            -d "{\"name\": \"CI/CD Deploy\", \"type\": \"CUSTOM\", \"summary\": \"Deployment to dev\", \"severity\": \"INFO\", \"properties\": {\"status\": \"${{ job.status }}\", \"job\": \"deploy-dev\", \"image\": \"hello-world-app:dev-${{ github.sha }}\", \"environment\": \"dev\", \"branch\": \"${{ github.ref_name }}\"}}"
+
+  deploy-integration:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/integration'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -f Dockerfile.integration \
+            --build-arg APPDYNAMICS_DOWNLOAD_URL=${{ secrets.APPDYNAMICS_DOWNLOAD_URL }} \
+            --build-arg APPDYNAMICS_CLIENT_ACCESS_KEY=${{ secrets.APPDYNAMICS_CLIENT_ACCESS_KEY }} \
+            -t hello-world-app:integration-${{ github.sha }} .
+
+      - name: Deploy to Integration
+        run: |
+          # Simulate deployment with docker run (replace with actual deployment)
+          docker run -d --name hello-world-app-integration \
+            -p 8081:8080 \
+            -e SPRING_PROFILES_ACTIVE=integration \
+            -e APPDYNAMICS_CONTROLLER_HOST=${{ secrets.APPDYNAMICS_CONTROLLER_HOST }} \
+            -e APPDYNAMICS_CONTROLLER_PORT=443 \
+            -e APPDYNAMICS_CONTROLLER_SSL_ENABLED=true \
+            -e APPDYNAMICS_CONTROLLER_ACCOUNT=${{ secrets.APPDYNAMICS_CONTROLLER_ACCOUNT }} \
+            -e APPDYNAMICS_CONTROLLER_ACCESS_KEY=${{ secrets.APPDYNAMICS_CONTROLLER_ACCESS_KEY_INTEGRATION }} \
+            -e APPDYNAMICS_AGENT_APPLICATION_NAME=HelloWorldApp-Integration \
+            -e APPDYNAMICS_AGENT_TIER_NAME=WebTier-Integration \
+            -e APPDYNAMICS_AGENT_NODE_NAME=Node1-Integration \
+            -e SPLUNK_HEC_URL=${{ secrets.SPLUNK_HEC_URL }} \
+            -e SPLUNK_HEC_TOKEN=${{ secrets.SPLUNK_HEC_TOKEN_INTEGRATION }} \
+            hello-world-app:integration-${{ github.sha }}
+
+      - name: Send deployment status to Splunk
+        if: always()
+        run: |
+          curl -k "${{ secrets.SPLUNK_HEC_URL }}/services/collector" \
+            -H "Authorization: Splunk ${{ secrets.SPLUNK_HEC_TOKEN_INTEGRATION }}" \
+            -d "{\"event\": {\"job\": \"deploy-integration\", \"status\": \"${{ job.status }}\", \"image\": \"hello-world-app:integration-${{ github.sha }}\", \"environment\": \"integration\", \"branch\": \"${{ github.ref_name }}\"}, \"sourcetype\": \"github_actions\", \"source\": \"ci_cd_pipeline\""
+
+      - name: Send deployment status to AppDynamics
+        if: always()
+        run: |
+          curl -X POST "https://${{ secrets.APPDYNAMICS_CONTROLLER_HOST }}/controller/rest/applications/HelloWorldApp-Integration/events" \
+            -H "X-Events-API-AccountName: ${{ secrets.APPDYNAMICS_CONTROLLER_ACCOUNT }}" \
+            -H "X-Events-API-Key: ${{ secrets.APPDYNAMICS_CONTROLLER_ACCESS_KEY_INTEGRATION }}" \
+            -d "{\"name\": \"CI/CD Deploy\", \"type\": \"CUSTOM\", \"summary\": \"Deployment to integration\", \"severity\": \"INFO\", \"properties\": {\"status\": \"${{ job.status }}\", \"job\": \"deploy-integration\", \"image\": \"hello-world-app:integration-${{ github.sha }}\", \"environment\": \"integration\", \"branch\": \"${{ github.ref_name }}\"}}"
+
+  deploy-prod:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    environment:
+      name: prod
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -f Dockerfile.prod \
+            --build-arg APPDYNAMICS_DOWNLOAD_URL=${{ secrets.APPDYNAMICS_DOWNLOAD_URL }} \
+            --build-arg APPDYNAMICS_CLIENT_ACCESS_KEY=${{ secrets.APPDYNAMICS_CLIENT_ACCESS_KEY }} \
+            -t hello-world-app:prod-${{ github.sha }} .
+
+      - name: Deploy to Prod
+        run: |
+          # Simulate deployment with docker run (replace with actual deployment)
+          docker run -d --name hello-world-app-prod \
+            -p 8082:8080 \
+            -e SPRING_PROFILES_ACTIVE=prod \
+            -e APPDYNAMICS_CONTROLLER_HOST=${{ secrets.APPDYNAMICS_CONTROLLER_HOST }} \
+            -e APPDYNAMICS_CONTROLLER_PORT=443 \
+            -e APPDYNAMICS_CONTROLLER_SSL_ENABLED=true \
+            -e APPDYNAMICS_CONTROLLER_ACCOUNT=${{ secrets.APPDYNAMICS_CONTROLLER_ACCOUNT }} \
+            -e APPDYNAMICS_CONTROLLER_ACCESS_KEY=${{ secrets.APPDYNAMICS_CONTROLLER_ACCESS_KEY_PROD }} \
+            -e APPDYNAMICS_AGENT_APPLICATION_NAME=HelloWorldApp-Prod \
+            -e APPDYNAMICS_AGENT_TIER_NAME=WebTier-Prod \
+            -e APPDYNAMICS_AGENT_NODE_NAME=Node1-Prod \
+            -e SPLUNK_HEC_URL=${{ secrets.SPLUNK_HEC_URL }} \
+            -e SPLUNK_HEC_TOKEN=${{ secrets.SPLUNK_HEC_TOKEN_PROD }} \
+            hello-world-app:prod-${{ github.sha }}
+
+      - name: Send deployment status to Splunk
+        if: always()
+        run: |
+          curl -k "${{ secrets.SPLUNK_HEC_URL }}/services/collector" \
+            -H "Authorization: Splunk ${{ secrets.SPLUNK_HEC_TOKEN_PROD }}" \
+            -d "{\"event\": {\"job\": \"deploy-prod\", \"status\": \"${{ job.status }}\", \"image\": \"hello-world-app:prod-${{ github.sha }}\", \"environment\": \"prod\", \"branch\": \"${{ github.ref_name }}\"}, \"sourcetype\": \"github_actions\", \"source\": \"ci_cd_pipeline\""
+
+      - name: Send deployment status to AppDynamics
+        if: always()
+        run: |
+          curl -X POST "https://${{ secrets.APPDYNAMICS_CONTROLLER_HOST }}/controller/rest/applications/HelloWorldApp-Prod/events" \
+            -H "X-Events-API-AccountName: ${{ secrets.APPDYNAMICS_CONTROLLER_ACCOUNT }}" \
+            -H "X-Events-API-Key: ${{ secrets.APPDYNAMICS_CONTROLLER_ACCESS_KEY_PROD }}" \
+            -d "{\"name\": \"CI/CD Deploy\", \"type\": \"CUSTOM\", \"summary\": \"Deployment to prod\", \"severity\": \"INFO\", \"properties\": {\"status\": \"${{ job.status }}\", \"job\": \"deploy-prod\", \"image\": \"hello-world-app:prod-${{ github.sha }}\", \"environment\": \"prod\", \"branch\": \"${{ github.ref_name }}\"}}"

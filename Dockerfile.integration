@@ -1,7 +1,17 @@
 FROM openjdk:17-jdk-slim
 
-# Copy AppDynamics agent
-COPY docker/appdynamics/appdynamics-agent /appdynamics-agent
+# Install curl and unzip
+RUN apt-get update && apt-get install -y curl unzip && apt-get clean
+
+# Download and install AppDynamics Java Agent from AppDynamics Downloads Portal
+ARG APPDYNAMICS_DOWNLOAD_URL
+ARG APPDYNAMICS_CLIENT_ACCESS_KEY
+ARG APPDYNAMICS_AGENT_VERSION=24.9.0
+RUN curl -L -H "Authorization: Bearer ${APPDYNAMICS_CLIENT_ACCESS_KEY}" \
+    -o /tmp/AppServerAgent.zip ${APPDYNAMICS_DOWNLOAD_URL}/downloadfile/AppServerAgent-${APPDYNAMICS_AGENT_VERSION}.zip \
+    && mkdir -p /opt/appdynamics \
+    && unzip /tmp/AppServerAgent.zip -d /opt/appdynamics \
+    && rm /tmp/AppServerAgent.zip
 
 # Copy the built JAR file
 COPY build/libs/hello-world-app-0.0.1-SNAPSHOT.jar /app.jar
@@ -11,6 +21,6 @@ EXPOSE 8080
 
 # Set environment-specific profile
 ENV SPRING_PROFILES_ACTIVE=integration
-ENV JAVA_OPTS="-javaagent:/appdynamics-agent/javaagent.jar"
+ENV JAVA_OPTS="-javaagent:/opt/appdynamics/javaagent.jar"
 
 ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app.jar"]
